@@ -55,6 +55,7 @@ class Format(Enum):
     YOLO = 11
     YOLO_OBB = 12
     CSV_OLD = 13
+    IAN_OCR = 14
 
     def __str__(self):
         return self.name
@@ -146,6 +147,12 @@ class Converter(object):
             "link": "https://labelstud.io/guide/export.html#ASR-MANIFEST",
             "tags": ["speech recognition"],
         },
+        Format.IAN_OCR: {
+            "title": "IAN OCR",
+            "description": "Export OCR labels for IAN format.",
+            "link": "https://labelstud.io/guide/export.html#IAN-OCR",
+            "tags": ["OCR"],
+        }
     }
 
     def all_formats(self):
@@ -265,6 +272,92 @@ class Converter(object):
                 upload_dir=self.upload_dir,
                 download_resources=self.download_resources,
             )
+        elif format == Format.IAN_OCR:
+            self.convert_to_ian_ocr(input_data, output_data, is_dir=is_dir)
+        else:
+            raise FormatNotSupportedError(f"Format {format} is not supported.")
+
+    def convert_to_ian_ocr(self, input_data, output_dir, is_dir=True):
+        self._check_format(Format.IAN_OCR)
+        ensure_dir(output_dir)
+        output_file = os.path.join(output_dir, "ian_ocr_result.json")
+
+        annotations = []
+
+        # 메타 데이터 초기화
+        metadata = {
+            "image_path": "unknown",
+            "status": "라벨링 완료",
+            "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "image_width": 0,
+            "image_height": 0,
+        }
+
+        item_iterator = self.iter_from_dir(input_data) if is_dir else self.iter_from_json_file(input_data)
+
+        for idx, item in enumerate(item_iterator):
+            task_data = item.get("input", {})
+            task_annotations = item.get("output", {})
+
+            metadata["image_path"] = task_data.get("image", "unknown")
+            metadata["image_width"] = task_annotations.get("bbox", [{}])[0].get("original_width", 0)
+            metadata["image_height"] = task_annotations.get("bbox", [{}])[0].get("original_height", 0)
+
+            for key, annotation_list in task_annotations.items():
+                for annotation in annotation_list:
+                    converted_points = []
+                    if all(key in annotation for key in ["x", "y", "width", "height", "rotation"]):
+                        converted_points = self.convert_rectangle_to_quad(annotation)
+
+                    normalized_points = self.normalization_points(converted_points)
+
+                    annotation_data = {
+                        "text": annotation.get("text"),
+                        "quad": normalized_points,
+                        "confidence": annotation.get("score", 1.0),
+                    }
+                    annotations.append(annotation_data)
+
+        output_data = {"metadata": metadata, "annotations": annotations}
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(output_data, f, indent=4, ensure_ascii=False)
+
+    def convert_rectangle_to_quad(self, value):
+        x1 = value["x"]
+        y1 = value["y"]
+        width = value["width"]
+        height = value["height"]
+        rotation = value["rotation"]
+
+        theta = math.radians(rotation)
+        cos_theta = math.cos(theta)
+        sin_theta = math.sin(theta)
+
+        corners = [
+            (x1, y1),
+            (x1 + width, y1),
+            (x1 + width, y1 + height),
+            (x1, y1 + height)
+        ]
+
+        rotated_points = []
+        for x, y in corners:
+            dx = x - x1
+            dy = y - y1
+            x_rot = dx * cos_theta - dy * sin_theta + x1
+            y_rot = dx * sin_theta + dy * cos_theta + y1
+            rotated_points.append([x_rot, y_rot])
+
+        return rotated_points
+
+    def normalization_points(self, points):
+        normalized = []
+
+        for x, y in points:
+            x_norm = x / 100 if 100 else 0
+            y_norm = y / 100 if 100 else 0
+            normalized.append([x_norm, y_norm])
+        return normalized
 
     def _get_data_keys_and_output_tags(self, output_tags=None):
         data_keys = set()
